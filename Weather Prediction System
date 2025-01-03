@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Prediction</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .error {
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Weather Prediction System</h1>
+        <p>Enter a city name or use the microphone to input the city:</p>
+        <input type="text" id="city-input" placeholder="Enter city name" />
+        <button onclick="startVoiceRecognition('city-input')">🎤 Use Voice</button>
+        <button onclick="handleCityInput(document.getElementById('city-input').value)">Submit</button>
+        <p class="error" id="error-message"></p>
+        <div id="result"></div>
+        <div>
+            <h2>Predictions:</h2>
+            <p>Predicted Temperature: <span id="predicted-temperature-celsius">N/A</span> | <span id="predicted-temperature-fahrenheit">N/A</span></p>
+            <p>Predicted Humidity: <span id="predicted-humidity">N/A</span></p>
+            <p>Predicted Precipitation: <span id="predicted-precipitation-mm">N/A</span> | <span id="predicted-precipitation-inch">N/A</span></p>
+        </div>
+    </div>
+
+    <script>
+        const timeZoneDBAPIKey = 'XB6EHS2NKPG6';
+        const weatherAPIKey = '867d51f06cc24c1783a82226240209';
+
+        function startVoiceRecognition(inputId) {
+            if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                const recognition = new SpeechRecognition();
+                recognition.interimResults = true;
+                recognition.onresult = function (event) {
+                    const last = event.results.length - 1;
+                    let command = event.results[last][0].transcript.trim();
+                    if (command.endsWith(".")) {
+                        command = command.slice(0, -1);
+                    }
+                    document.getElementById(inputId).value = command;
+                    handleCityInput(command);
+                };
+                recognition.start();
+            } else {
+                alert('Speech recognition is not supported in your browser. Please use Chrome or Edge.');
+            }
+        }
+
+        async function fetchTimeAndDate(city) {
+            const apiUrl = `https://api.timezonedb.com/v2.1/get-time-zone?key=${timeZoneDBAPIKey}&format=json&by=zone&zone=${city}`;
+            try {
+                const response = await fetch(apiUrl);
+                if (!response.ok) {
+                    throw new Error('Network response was not ok.');
+                }
+                const data = await response.json();
+                if (data.status === 'FAILED') {
+                    throw new Error(data.message);
+                }
+                const currentDate = new Date(data.formatted);
+                const nextDate = new Date(currentDate);
+                nextDate.setDate(currentDate.getDate() + 1);
+                return { currentDate, nextDate: formatDate(nextDate) };
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                throw new Error('Error fetching data: ' + error.message);
+            }
+        }
+
+        function formatDate(date) {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        }
+
+        async function fetchHistoricalWeather(location) {
+            const endDate = new Date();
+            const startDate = new Date();
+            startDate.setDate(endDate.getDate() - 90);
+
+            const startDateStr = formatDate(startDate);
+            const endDateStr = formatDate(endDate);
+
+            const apiUrl = `https://api.weatherapi.com/v1/history.json?key=${weatherAPIKey}&q=${location}&dt=${startDateStr}&end_dt=${endDateStr}`;
+            try {
+                const response = await fetch(apiUrl);
+                if (!response.ok) {
+                    throw new Error('Network response was not ok.');
+                }
+                const data = await response.json();
+                prepareDataForRegression(data);
+            } catch (error) {
+                console.error('Error fetching data:', error);
+            }
+        }
+
+        function prepareDataForRegression(data) {
+            const weatherData = data.forecast.forecastday;
+
+            const xTemperature = [];
+            const yTemperature = [];
+            const xHumidity = [];
+            const yHumidity = [];
+            const xPrecipitation = [];
+            const yPrecipitation = [];
+
+            weatherData.forEach(day => {
+                const temperature = day.day.maxtemp_c;
+                const humidity = day.day.avghumidity;
+                const precipitation = day.day.totalprecip_mm;
+
+                if (precipitation >= 0) {
+                    xTemperature.push([humidity, precipitation]);
+                    yTemperature.push(temperature);
+
+                    xHumidity.push([temperature, precipitation]);
+                    yHumidity.push(humidity);
+
+                    xPrecipitation.push([temperature, humidity]);
+                    yPrecipitation.push(precipitation);
+                }
+            });
+
+            if (xTemperature.length > 0 && yTemperature.length > 0) {
+                const { slope: tempSlope, intercept: tempIntercept } = linearRegression(xTemperature, yTemperature);
+                const humidityInput = 60;
+                const predictedTemperatureCelsius = tempSlope * humidityInput + tempIntercept;
+                document.getElementById("predicted-temperature-celsius").textContent = predictedTemperatureCelsius.toFixed(2) + " °C";
+
+                const predictedTemperatureFahrenheit = (predictedTemperatureCelsius * 9 / 5) + 32;
+                document.getElementById("predicted-temperature-fahrenheit").textContent = predictedTemperatureFahrenheit.toFixed(2) + " °F";
+            }
+
+            if (xHumidity.length > 0 && yHumidity.length > 0) {
+                const { slope: humidSlope, intercept: humidIntercept } = linearRegression(xHumidity, yHumidity);
+                const temperatureInput = 25;
+                const predictedHumidity = humidSlope * temperatureInput + humidIntercept;
+                document.getElementById("predicted-humidity").textContent = predictedHumidity.toFixed(2) + " %";
+            }
+
+            if (xPrecipitation.length > 0 && yPrecipitation.length > 0) {
+                const { slope: precipSlope, intercept: precipIntercept } = linearRegression(xPrecipitation, yPrecipitation);
+                const temperatureInput = 25;
+                const humidityInput = 60;
+                let predictedPrecipitationMM = precipSlope * temperatureInput + precipIntercept;
+                predictedPrecipitationMM = Math.max(predictedPrecipitationMM, 0);
+                const predictedPrecipitationInch = predictedPrecipitationMM * 0.0393701;
+                document.getElementById("predicted-precipitation-mm").textContent = predictedPrecipitationMM.toFixed(2) + " mm";
+                document.getElementById("predicted-precipitation-inch").textContent = predictedPrecipitationInch.toFixed(2) + " inches";
+            }
+        }
+
+        function linearRegression(x, y) {
+            const n = x.length;
+            const xMean = x.reduce((acc, curr) => acc + curr[0], 0) / n;
+            const yMean = y.reduce((acc, curr) => acc + curr, 0) / n;
+
+            let numerator = 0;
+            let denominator = 0;
+
+            for (let i = 0; i < n; i++) {
+                const xVal = x[i][0];
+                const yVal = y[i];
+
+                numerator += (xVal - xMean) * (yVal - yMean);
+                denominator += (xVal - xMean) * (xVal - xMean);
+            }
+
+            const slope = numerator / denominator;
+            const intercept = yMean - (slope * xMean);
+
+            return { slope, intercept };
+        }
+
+        async function handleCityInput(cityInput) {
+            const errorMessage = document.getElementById("error-message");
+            const result = document.getElementById("result");
+
+            if (!cityInput) {
+                errorMessage.textContent = "Please enter a city name.";
+                return;
+            }
+
+            try {
+                errorMessage.textContent = '';
+                result.innerHTML = '';
+
+                const { currentDate, nextDate } = await fetchTimeAndDate(cityInput);
+
+                result.innerHTML = `
+                    <h1>Prediction in ${cityInput}</h1>
+                    <h1>Prediction for Tomorrow</h1>
+                `;
+
+                await fetchHistoricalWeather(cityInput);
+            } catch (error) {
+                console.error(error);
+                errorMessage.textContent = 'Error fetching data: ' + error.message;
+            }
+        }
+    </script>
+</body>
+</html>
